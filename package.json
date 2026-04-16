@@ -1,0 +1,31 @@
+{
+  "name": "interview-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^6.19.3",
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs": "^4.22.0",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "face-api.js": "^0.22.2",
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^8.0.5",
+    "nodemon": "^3.1.14",
+    "prisma": "^6.19.3",
+    "recharts": "^3.8.1"
+  }
+}

@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = "postgresql://postgres:password123@localhost:5432/interviewprep?schema=public"
+}
+
+model Resume {
+  id        Int      @id @default(autoincrement())
+  text      String
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  password     String
+  verified     Boolean   @default(false)
+  xp           Int       @default(0)
+  level        Int       @default(1)
+  streak       Int       @default(0)
+  lastActiveAt DateTime?
+  badges       Json      @default("[]")
+
+  sessions     InterviewSession[]
+}
+
+model OTP {
+  id        Int      @id @default(autoincrement())
+  email     String
+  code      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model InterviewSession {
+  id         String   @id @default(uuid())
+  userId     String
+  role       String
+  background String   @default("")  // e.g. "3rd year BTech CSE"
+  createdAt  DateTime @default(now())
+
+  // Array of per-question scores:
+  // non-coding: [{ category, question, technicalDepth, clarity, confidenceTone, feedback, improvement }]
+  // coding:     [{ category, question, correctness, codeQuality, efficiency, feedback, improvement }]
+  scores     Json
+
+  violations Json     @default("{}")
+  xpEarned   Int      @default(0)
+
+  user       User     @relation(fields: [userId], references: [id])
+}

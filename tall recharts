@@ -1,0 +1,224 @@
+warning: in the working copy of 'prisma/migrations/migration_lock.toml', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/index.js b/index.js[m
+[1mindex a19f202..ed71f42 100644[m
+[1m--- a/index.js[m
+[1m+++ b/index.js[m
+[36m@@ -1,3 +1,6 @@[m
+[32m+[m[32mrequire('dotenv').config()[m
+[32m+[m[32mconsole.log("EMAIL:", process.env.GMAIL_USER)[m
+[32m+[m[32mconsole.log("PASS:", process.env.GMAIL_PASS)[m
+ const express = require("express")[m
+ const cors = require("cors")[m
+ const app = express()[m
+[36m@@ -10,7 +13,16 @@[m [mconst genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)[m
+ const bcrypt = require('bcrypt')[m
+ const jwt = require('jsonwebtoken')[m
+ console.log("API KEY loaded:", process.env.GEMINI_API_KEY ? "YES" : "NO")[m
+[31m-[m
+[32m+[m[32mconst nodemailer = require('nodemailer')[m
+[32m+[m
+[32m+[m[32m// email transporter — uses Gmail to send OTP emails[m
+[32m+[m[32mconst transporter = nodemailer.createTransport({[m
+[32m+[m[32m  service: 'gmail',[m
+[32m+[m[32m  auth: {[m
+[32m+[m[32m    user: process.env.GMAIL_USER,[m
+[32m+[m[32m    pass: process.env.GMAIL_PASS[m
+[32m+[m[32m  }[m
+[32m+[m[32m})[m
+ function authenticateToken(req, res, next) {[m
+   const authHeader = req.headers['authorization'][m
+   const token = authHeader && authHeader.split(' ')[1][m
+[36m@@ -130,27 +142,86 @@[m [mconst evaluation = JSON.parse(cleaned)[m
+     res.status(500).json({ error: 'Failed to evaluate answer. Please try again.' })[m
+   }[m
+ })[m
+[31m-app.post('/signup', async (req, res) => {[m
+[31m-  const { email, password } = req.body  // extract email and password from request body[m
+[32m+[m[32mapp.post('/send-otp', async (req, res) => {[m
+[32m+[m[32m  const { email } = req.body[m
+[32m+[m
+[32m+[m[32m  if (!email) {[m
+[32m+[m[32m    return res.status(400).json({ error: 'email required' })[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  try {[m
+[32m+[m[32m    // check if already registered[m
+[32m+[m[32m    const existing = await prisma.user.findUnique({ where: { email } })[m
+[32m+[m[32m    if (existing) {[m
+[32m+[m[32m      return res.status(400).json({ error: 'Email already registered' })[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    const code = Math.floor(100000 + Math.random() * 900000).toString()[m
+[32m+[m[32m    const expiresAt = new Date(Date.now() + 10 * 60 * 1000)[m
+[32m+[m
+[32m+[m[32m    await prisma.oTP.deleteMany({ where: { email } })[m
+[32m+[m
+[32m+[m[32m    await prisma.oTP.create({[m
+[32m+[m[32m      data: { email, code, expiresAt }[m
+[32m+[m[32m    })[m
+[32m+[m
+[32m+[m[32m    await transporter.sendMail({[m
+[32m+[m[32m      from: process.env.GMAIL_USER,[m
+[32m+[m[32m      to: email,[m
+[32m+[m[32m      subject: 'Verify your email',[m
+[32m+[m[32m      html: `<h2>Your OTP is ${code}</h2>`[m
+[32m+[m[32m    })[m
+[32m+[m
+[32m+[m[32m    res.json({ message: 'OTP sent', email })[m
+[32m+[m
+[32m+[m[32m  } catch (err) {[m
+[32m+[m[32m  console.error("OTP ERROR 👉", err)[m
+[32m+[m[32m  res.status(500).json({ error: 'Failed to send OTP' })[m
+[32m+[m[32m}[m
+[32m+[m[32m})[m
+[32m+[m
+[32m+[m[32mapp.post('/verify-otp', async (req, res) => {[m
+[32m+[m[32m  const { email, code } = req.body[m
+[32m+[m
+[32m+[m[32m  const record = await prisma.oTP.findFirst({[m
+[32m+[m[32m    where: { email, code }[m
+[32m+[m[32m  })[m
+[32m+[m
+[32m+[m[32m  if (!record) {[m
+[32m+[m[32m    return res.status(400).json({ error: 'Invalid OTP' })[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  if (new Date() > record.expiresAt) {[m
+[32m+[m[32m    return res.status(400).json({ error: 'OTP expired' })[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  // delete OTP[m
+[32m+[m[32m  await prisma.oTP.deleteMany({ where: { email } })[m
+[32m+[m
+[32m+[m[32m  res.json({ message: 'OTP verified' })[m
+[32m+[m[32m})[m
+[32m+[m[32mapp.post('/complete-signup', async (req, res) => {[m
+[32m+[m[32m  const { email, password } = req.body[m
+ [m
+   if (!email || !password) {[m
+[31m-    return res.status(400).json({ error: 'email and password are required' })  // reject if missing[m
+[32m+[m[32m    return res.status(400).json({ error: 'email and password required' })[m
+   }[m
+ [m
+   try {[m
+     const hashedPassword = await bcrypt.hash(password, 10)[m
+[31m-    // hash the password before storing — 10 = salt rounds (industry standard)[m
+[31m-    // raw password is NEVER stored, only the hash[m
+ [m
+     const user = await prisma.user.create({[m
+[31m-      data: { email, password: hashedPassword }  // save email + hashed password to database[m
+[32m+[m[32m      data: {[m
+[32m+[m[32m        email,[m
+[32m+[m[32m        password: hashedPassword,[m
+[32m+[m[32m        verified: true[m
+[32m+[m[32m      }[m
+     })[m
+ [m
+[31m-    res.json({ message: 'User created', userId: user.id })  // return success with new user id[m
+[32m+[m[32m    res.json({ message: 'Account created successfully' })[m
+ [m
+[31m-  } catch (error) {[m
+[31m-    res.status(400).json({ error: 'Email already exists' })[m
+[31m-    // prisma throws error if email already exists (because email is @unique in schema)[m
+[32m+[m[32m  } catch (err) {[m
+[32m+[m[32m    res.status(500).json({ error: 'Signup failed' })[m
+   }[m
+ })[m
+ [m
+[1mdiff --git a/package-lock.json b/package-lock.json[m
+[1mindex 05d718d..a5a27ae 100644[m
+[1m--- a/package-lock.json[m
+[1m+++ b/package-lock.json[m
+[36m@@ -14,8 +14,10 @@[m
+         "@prisma/client": "^6.19.3",[m
+         "bcrypt": "^6.0.0",[m
+         "cors": "^2.8.6",[m
+[32m+[m[32m        "dotenv": "^17.4.2",[m
+         "express": "^5.2.1",[m
+         "jsonwebtoken": "^9.0.3",[m
+[32m+[m[32m        "nodemailer": "^8.0.5",[m
+         "nodemon": "^3.1.14",[m
+         "prisma": "^6.19.3"[m
+       }[m
+[36m@@ -328,6 +330,18 @@[m
+         "url": "https://paulmillr.com/funding/"[m
+       }[m
+     },[m
+[32m+[m[32m    "node_modules/c12/node_modules/dotenv": {[m
+[32m+[m[32m      "version": "16.6.1",[m
+[32m+[m[32m      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-16.6.1.tgz",[m
+[32m+[m[32m      "integrity": "sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==",[m
+[32m+[m[32m      "license": "BSD-2-Clause",[m
+[32m+[m[32m      "engines": {[m
+[32m+[m[32m        "node": ">=12"[m
+[32m+[m[32m      },[m
+[32m+[m[32m      "funding": {[m
+[32m+[m[32m        "url": "https://dotenvx.com"[m
+[32m+[m[32m      }[m
+[32m+[m[32m    },[m
+     "node_modules/c12/node_modules/readdirp": {[m
+       "version": "4.1.2",[m
+       "resolved": "https://registry.npmjs.org/readdirp/-/readdirp-4.1.2.tgz",[m
+[36m@@ -523,9 +537,9 @@[m
+       "license": "MIT"[m
+     },[m
+     "node_modules/dotenv": {[m
+[31m-      "version": "16.6.1",[m
+[31m-      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-16.6.1.tgz",[m
+[31m-      "integrity": "sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==",[m
+[32m+[m[32m      "version": "17.4.2",[m
+[32m+[m[32m      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-17.4.2.tgz",[m
+[32m+[m[32m      "integrity": "sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==",[m
+       "license": "BSD-2-Clause",[m
+       "engines": {[m
+         "node": ">=12"[m
+[36m@@ -1202,6 +1216,15 @@[m
+         "node-gyp-build-test": "build-test.js"[m
+       }[m
+     },[m
+[32m+[m[32m    "node_modules/nodemailer": {[m
+[32m+[m[32m      "version": "8.0.5",[m
+[32m+[m[32m      "resolved": "https://registry.npmjs.org/nodemailer/-/nodemailer-8.0.5.tgz",[m
+[32m+[m[32m      "integrity": "sha512-0PF8Yb1yZuQfQbq+5/pZJrtF6WQcjTd5/S4JOHs9PGFxuTqoB/icwuB44pOdURHJbRKX1PPoJZtY7R4VUoCC8w==",[m
+[32m+[m[32m      "license": "MIT-0",[m
+[32m+[m[32m      "engines": {[m
+[32m+[m[32m        "node": ">=6.0.0"[m
+[32m+[m[32m      }[m
+[32m+[m[32m    },[m
+     "node_modules/nodemon": {[m
+       "version": "3.1.14",[m
+       "resolved": "https://registry.npmjs.org/nodemon/-/nodemon-3.1.14.tgz",[m
+[1mdiff --git a/package.json b/package.json[m
+[1mindex 42b0946..3ee78a5 100644[m
+[1m--- a/package.json[m
+[1m+++ b/package.json[m
+[36m@@ -16,8 +16,10 @@[m
+     "@prisma/client": "^6.19.3",[m
+     "bcrypt": "^6.0.0",[m
+     "cors": "^2.8.6",[m
+[32m+[m[32m    "dotenv": "^17.4.2",[m
+     "express": "^5.2.1",[m
+     "jsonwebtoken": "^9.0.3",[m
+[32m+[m[32m    "nodemailer": "^8.0.5",[m
+     "nodemon": "^3.1.14",[m
+     "prisma": "^6.19.3"[m
+   }[m
+[1mdiff --git a/prisma/schema.prisma b/prisma/schema.prisma[m
+[1mindex f978ee0..cbe19bd 100644[m
+[1m--- a/prisma/schema.prisma[m
+[1m+++ b/prisma/schema.prisma[m
+[36m@@ -16,5 +16,13 @@[m [mmodel User {[m
+   id        Int      @id @default(autoincrement())[m
+   email     String   @unique[m
+   password  String[m
+[32m+[m[32m  verified  Boolean  @default(false)[m
+[32m+[m[32m  createdAt DateTime @default(now())[m
+[32m+[m[32m}[m
+[32m+[m[32mmodel OTP {[m
+[32m+[m[32m  id        Int      @id @default(autoincrement())[m
+[32m+[m[32m  email     String[m
+[32m+[m[32m  code      String[m
+[32m+[m[32m  expiresAt DateTime[m
+   createdAt DateTime @default(now())[m
+ }[m
+\ No newline at end of file[m
