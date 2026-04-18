@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = "postgresql://postgres:password123@localhost:5432/interviewprep?schema=public"
+  url      = env("DATABASE_URL")
 }
 
 model Resume {
@@ -23,7 +23,6 @@ model User {
   streak       Int       @default(0)
   lastActiveAt DateTime?
   badges       Json      @default("[]")
-
   sessions     InterviewSession[]
 }
 
@@ -36,19 +35,14 @@ model OTP {
 }
 
 model InterviewSession {
-  id         String   @id @default(uuid())
-  userId     String
-  role       String
-  background String   @default("")  // e.g. "3rd year BTech CSE"
-  createdAt  DateTime @default(now())
-
-  // Array of per-question scores:
-  // non-coding: [{ category, question, technicalDepth, clarity, confidenceTone, feedback, improvement }]
-  // coding:     [{ category, question, correctness, codeQuality, efficiency, feedback, improvement }]
-  scores     Json
-
-  violations Json     @default("{}")
-  xpEarned   Int      @default(0)
-
-  user       User     @relation(fields: [userId], references: [id])
+  id          String   @id @default(uuid())
+  userId      String
+  role        String
+  background  String   @default("")
+  createdAt   DateTime @default(now())
+  scores      Json
+  violations  Json     @default("{}")
+  xpEarned    Int      @default(0)
+  isVoiceMode Boolean  @default(false)
+  user        User     @relation(fields: [userId], references: [id])
 }

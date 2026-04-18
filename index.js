@@ -1,34 +1,63 @@
 require('dotenv').config()
-console.log("EMAIL:", process.env.GMAIL_USER)
-console.log("PASS:", process.env.GMAIL_PASS)
 const express = require("express")
 const cors = require("cors")
 const app = express()
 const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '10mb' }))
 const { GoogleGenerativeAI } = require("@google/generative-ai")
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
-console.log("API KEY loaded:", process.env.GEMINI_API_KEY ? "YES" : "NO")
 const nodemailer = require('nodemailer')
+const multer = require('multer')
+const path = require('path')
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS }
 })
 
+// ── GEMINI RETRY WRAPPER ──────────────────────────────────────────────────────
+// fix 2: retry up to 3 times with exponential backoff on quota errors
+async function geminiWithRetry(prompt, maxRetries = 3) {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" })
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt)
+      return result.response.text()
+    } catch (err) {
+      const isQuota = err?.message?.includes('429') ||
+        err?.message?.includes('quota') ||
+        err?.message?.includes('RESOURCE_EXHAUSTED') ||
+        err?.status === 429
+
+      if (isQuota && attempt < maxRetries) {
+        // exponential backoff: 2s, 4s, 8s
+        const waitMs = Math.pow(2, attempt) * 1000
+        console.log(`Gemini quota hit — retrying in ${waitMs}ms (attempt ${attempt}/${maxRetries})`)
+        await new Promise(res => setTimeout(res, waitMs))
+        continue
+      }
+
+      // not a quota error or out of retries
+      throw err
+    }
+  }
+}
+
 // ── BADGE DEFINITIONS ─────────────────────────────────────────────────────────
 const BADGES = {
   FIRST_BLOOD:   { id: "first_blood",   label: "First Blood",   icon: "🎯", desc: "Complete your first session" },
   ON_FIRE:       { id: "on_fire",        label: "On Fire",       icon: "🔥", desc: "7 day streak" },
-  CODE_WARRIOR:  { id: "code_warrior",   label: "Code Warrior",  icon: "💻", desc: "Correctness 8+ on 3 coding questions" },
-  BIG_BRAIN:     { id: "big_brain",      label: "Big Brain",     icon: "🧠", desc: "All avg dimension scores 8+ in one session" },
+  CODE_WARRIOR:  { id: "code_warrior",   label: "Code Warrior",  icon: "💻", desc: "Coding correctness 8+ in 3 sessions" },
+  BIG_BRAIN:     { id: "big_brain",      label: "Big Brain",     icon: "🧠", desc: "All dimension avgs 8+ in one session" },
   CLEAN_RECORD:  { id: "clean_record",   label: "Clean Record",  icon: "👁️", desc: "5 sessions with zero violations" },
   GRINDER:       { id: "grinder",        label: "Grinder",       icon: "🚀", desc: "Complete 10 sessions" },
   INTERVIEW_GOD: { id: "interview_god",  label: "Interview God", icon: "👑", desc: "Overall avg 8.5+ across 10 sessions" },
+  VOICE_MASTER:  { id: "voice_master",   label: "Voice Master",  icon: "🎤", desc: "Complete 3 voice conversation interviews" },
 }
 
 const LEVELS = [
@@ -46,57 +75,40 @@ function getLevelFromXP(xp) {
   return current
 }
 
-// ── XP CALCULATION ─────────────────────────────────────────────────────────────
 function calculateXP(scores, violations, isStreak) {
   const breakdown = []
   let total = 0
-
   total += 50
   breakdown.push({ reason: "Session completed", xp: 50 })
-
-  // scores is now array of { technicalDepth, clarity, confidenceTone } or { correctness, codeQuality, efficiency }
-  // calculate avg per question then count high scorers
   const questionAvgs = scores.map(s => {
     const vals = Object.values(s).filter(v => v != null && typeof v === "number")
     return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0
   })
-
   const highScores = questionAvgs.filter(a => a >= 8).length
   if (highScores > 0) {
     const xp = highScores * 20
     total += xp
     breakdown.push({ reason: `${highScores} question(s) avg 8+`, xp })
   }
-
   if (questionAvgs.length > 0 && questionAvgs.every(a => a >= 8)) {
     total += 100
     breakdown.push({ reason: "Perfect session bonus!", xp: 100 })
   }
-
-  if (isStreak) {
-    total += 30
-    breakdown.push({ reason: "Daily streak", xp: 30 })
-  }
-
+  if (isStreak) { total += 30; breakdown.push({ reason: "Daily streak", xp: 30 }) }
   const totalViolations = (violations.tabSwitch || 0) + (violations.faceAway || 0) + (violations.multipleFaces || 0)
   if (!violations.terminated && totalViolations === 0) {
-    total += 25
-    breakdown.push({ reason: "Zero violations", xp: 25 })
+    total += 25; breakdown.push({ reason: "Zero violations", xp: 25 })
   }
-
   if (violations.terminated) {
     total = Math.max(0, total - 30)
     breakdown.push({ reason: "Session terminated penalty", xp: -30 })
   }
-
   return { total, breakdown }
 }
 
-// ── BADGE CHECKER ──────────────────────────────────────────────────────────────
 async function checkAndAwardBadges(userId, currentBadges, allSessions, scores, streak) {
   const newBadges = [...currentBadges]
   const awarded = []
-
   function award(id) {
     if (!newBadges.includes(id)) {
       newBadges.push(id)
@@ -104,33 +116,23 @@ async function checkAndAwardBadges(userId, currentBadges, allSessions, scores, s
       if (badge) awarded.push(badge)
     }
   }
-
   if (allSessions.length >= 1) award("first_blood")
   if (streak >= 7) award("on_fire")
   if (allSessions.length >= 10) award("grinder")
-
-  // clean record
   const cleanSessions = allSessions.filter(s => {
     const v = s.violations || {}
     return !v.terminated && (v.tabSwitch || 0) + (v.faceAway || 0) + (v.multipleFaces || 0) === 0
   })
   if (cleanSessions.length >= 5) award("clean_record")
-
-  // big brain — all question avgs 8+ this session
   const allHigh = scores.every(s => {
     const vals = Object.values(s).filter(v => v != null && typeof v === "number")
     return vals.length > 0 && vals.reduce((a, b) => a + b, 0) / vals.length >= 8
   })
   if (allHigh) award("big_brain")
-
-  // code warrior — coding correctness 8+ in 3 sessions
   const codingHighSessions = allSessions.filter(s =>
-    s.scores && Array.isArray(s.scores) &&
-    s.scores.some(q => q.category === "coding" && (q.correctness || 0) >= 8)
+    Array.isArray(s.scores) && s.scores.some(q => q.category === "coding" && (q.correctness || 0) >= 8)
   ).length
   if (codingHighSessions >= 3) award("code_warrior")
-
-  // interview god — overall avg 8.5+ across 10 sessions
   if (allSessions.length >= 10) {
     const allAvgs = allSessions.map(s => {
       if (!Array.isArray(s.scores)) return 0
@@ -140,11 +142,12 @@ async function checkAndAwardBadges(userId, currentBadges, allSessions, scores, s
     const overallAvg = allAvgs.reduce((a, b) => a + b, 0) / allAvgs.length
     if (overallAvg >= 8.5) award("interview_god")
   }
-
+  // voice master badge
+  const voiceSessions = allSessions.filter(s => s.isVoiceMode).length
+  if (voiceSessions >= 3) award("voice_master")
   return { newBadges, awarded }
 }
 
-// ── STREAK ─────────────────────────────────────────────────────────────────────
 function calculateStreak(lastActiveAt, currentStreak) {
   if (!lastActiveAt) return { newStreak: 1, isStreak: false }
   const now = new Date()
@@ -155,7 +158,6 @@ function calculateStreak(lastActiveAt, currentStreak) {
   return { newStreak: 1, isStreak: false }
 }
 
-// ── AUTH MIDDLEWARE ────────────────────────────────────────────────────────────
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization']
   const token = authHeader && authHeader.split(' ')[1]
@@ -169,149 +171,167 @@ function authenticateToken(req, res, next) {
   }
 }
 
-// ── ROUTES ─────────────────────────────────────────────────────────────────────
-app.get("/", (req, res) => res.json({ message: "Express server is running" }))
-app.get("/status", (req, res) => res.json({ status: "ok", server: "interview-backend" }))
-app.get("/info", (req, res) => res.json({ name: "Snigdha", college: "IEM", year: "3rd" }))
-
-app.post("/submit", (req, res) => {
-  const { name, message } = req.body
-  if (!name || !message) return res.status(400).json({ error: "name and message are required" })
-  res.json({ received: true, yourData: req.body })
+// ── RESUME EXTRACTION ─────────────────────────────────────────────────────────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['.pdf', '.docx', '.doc', '.txt', '.png', '.jpg', '.jpeg']
+    const ext = path.extname(file.originalname).toLowerCase()
+    if (allowed.includes(ext)) cb(null, true)
+    else cb(new Error('File type not supported'))
+  }
 })
 
-app.post('/resume', async (req, res) => {
-  const { text } = req.body
-  if (!text) return res.status(400).json({ error: 'text field is required' })
-  const resume = await prisma.resume.create({ data: { text } })
-  res.json({ received: true, id: resume.id, text: resume.text })
+app.post('/extract-resume', authenticateToken, upload.single('resume'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
+  const ext = path.extname(req.file.originalname).toLowerCase()
+  let text = ''
+  try {
+    if (ext === '.txt') {
+      text = req.file.buffer.toString('utf-8')
+    } else if (ext === '.pdf') {
+      const pdfParse = require('pdf-parse')
+      const data = await pdfParse(req.file.buffer)
+      text = data.text
+    } else if (ext === '.docx' || ext === '.doc') {
+      const mammoth = require('mammoth')
+      const result = await mammoth.extractRawText({ buffer: req.file.buffer })
+      text = result.value
+    } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+      const Tesseract = require('tesseract.js')
+      const { data: { text: ocrText } } = await Tesseract.recognize(req.file.buffer, 'eng')
+      text = ocrText
+    }
+    if (!text || text.trim().length < 50) {
+      return res.status(400).json({ error: 'Could not extract enough text. Please paste your resume manually.' })
+    }
+    res.json({ text: text.trim() })
+  } catch (err) {
+    console.error('Resume extraction error:', err)
+    res.status(500).json({ error: 'Failed to extract text. Please paste your resume manually.' })
+  }
 })
 
-app.get('/resumes', async (req, res) => {
-  const resumes = await prisma.resume.findMany()
-  res.json(resumes)
-})
-
-app.delete('/resume/:id', async (req, res) => {
-  await prisma.resume.delete({ where: { id: Number(req.params.id) } })
-  res.json({ deleted: true })
-})
+// ── STANDARD ROUTES ───────────────────────────────────────────────────────────
+app.get("/", (req, res) => res.json({ message: "InterviewPrep API running" }))
+app.get("/status", (req, res) => res.json({ status: "ok" }))
 
 app.post('/generate-questions', authenticateToken, async (req, res) => {
   const { text } = req.body
   if (!text) return res.status(400).json({ error: 'resume text is required' })
-
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" })
     const prompt = `You are an expert technical interviewer. Based on this resume, generate exactly 5 interview questions.
-
 Return ONLY a JSON array of exactly 5 objects. No explanation, no markdown, just the raw array.
 Each object must have exactly two fields:
 - "question": the interview question string
 - "category": one of "skillset", "education", "work", "hr", "coding"
-
 Rules:
 - Use "coding" ONLY for questions that require writing actual code
-- If the resume has programming experience, include at least 1 "coding" question
+- If the resume has programming experience, include at least 1 coding question
 - Cover at least 3 different categories total
-
 Resume: ${text}`
 
-    const result = await model.generateContent(prompt)
-    const response = result.response.text()
-    const cleaned = response.replace(/```json|```/g, "").trim()
+    const raw = await geminiWithRetry(prompt)
+    const cleaned = raw.replace(/```json|```/g, "").trim()
     const questions = JSON.parse(cleaned)
     res.json({ questions })
   } catch (error) {
     console.error(error)
+    // fix 2: user-friendly quota error message
+    if (error?.message?.includes('429') || error?.message?.includes('quota') || error?.message?.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({ error: 'AI service is busy right now. Please wait 30 seconds and try again.' })
+    }
     res.status(500).json({ error: 'Failed to generate questions. Please try again.' })
   }
 })
 
-// ── EVALUATE ANSWER — 3 dimensions ────────────────────────────────────────────
 app.post('/evaluate-answer', async (req, res) => {
   const { question, answer, category, background } = req.body
-  // background = candidate background e.g. "3rd year BTech CSE student"
-
   if (!question || !answer) return res.status(400).json({ error: 'question and answer are required' })
-
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" })
     const isCoding = category === "coding"
     const candidateContext = background
-      ? `The candidate is a ${background}. Score them relative to what is reasonably expected from someone at that level — not against a senior engineer standard. A ${background} who demonstrates solid understanding of the concept, gives relevant examples, and shows clear thinking deserves 8-9. Reserve 10 for exceptional answers that go beyond expectations for their level.`
-      : `Score relative to a typical student or early-career developer. Solid, clear, relevant answers should score 7-9. Reserve 10 for exceptional depth.`
+      ? `The candidate is a ${background}. Score relative to what is expected at that level — not a senior engineer standard. A ${background} who demonstrates solid understanding deserves 8-9. Reserve 10 for exceptional answers beyond expectations for their level.`
+      : `Score relative to a student or early-career developer. Solid answers should score 7-9.`
 
     const prompt = isCoding
       ? `You are an expert software engineer evaluating a coding answer.
-
 ${candidateContext}
-
 Question: ${question}
-Code Answer: ${answer}
-
-Evaluate on exactly these 3 dimensions:
-1. Correctness — Does the code solve the problem correctly? Does it handle edge cases?
-2. Code Quality — Is the code clean, readable, well-structured, good variable names?
-3. Efficiency — Is the time/space complexity reasonable? Are there obvious optimizations missed?
-
-Scoring guide:
-- 9-10: Correct, clean, efficient. Handles edge cases. Exactly what you'd expect from a strong candidate at their level.
-- 7-8: Mostly correct with minor issues. Readable. Reasonable approach.
-- 5-6: Works for basic cases but misses edge cases or has quality issues.
-- 3-4: Partially correct or has significant logic errors.
-- 1-2: Incorrect or does not address the problem.
-
-Return ONLY a JSON object, nothing else:
-{
-  "correctness": <1-10>,
-  "codeQuality": <1-10>,
-  "efficiency": <1-10>,
-  "feedback": "<2-3 sentences about what was good and what was wrong>",
-  "improvement": "<one specific actionable thing to improve>"
-}`
-      : `You are an expert technical interviewer evaluating a spoken/written interview answer.
-
+Code: ${answer}
+Return ONLY a JSON object:
+{"correctness":<1-10>,"codeQuality":<1-10>,"efficiency":<1-10>,"feedback":"<2-3 sentences>","improvement":"<one thing>"}`
+      : `You are an expert technical interviewer evaluating an answer.
 ${candidateContext}
-
 Question: ${question}
 Answer: ${answer}
+Evaluate: Technical Depth (knowledge accuracy), Clarity (structure), Confidence Tone (assertiveness).
+Scoring: 9-10 exceeds level expectation. 7-8 solid. 5-6 surface-level. 3-4 weak. 1-2 very poor.
+Return ONLY a JSON object:
+{"technicalDepth":<1-10>,"clarity":<1-10>,"confidenceTone":<1-10>,"feedback":"<2-3 sentences>","improvement":"<one thing>"}`
 
-Evaluate on exactly these 3 dimensions:
-1. Technical Depth — How accurate and detailed is the technical knowledge shown? Does the candidate understand the concept, not just the surface?
-2. Clarity — Is the answer well-structured, easy to follow, and to the point? Does it avoid rambling?
-3. Confidence Tone — Does the answer sound assertive and sure? Or is it hesitant, vague, and full of "I think maybe"?
-
-Scoring guide:
-- 9-10: Strong on this dimension. Clearly exceeds typical expectation for their level.
-- 7-8: Good. Demonstrates solid understanding or communication at the expected level.
-- 5-6: Adequate but surface-level. Some gaps or unclear communication.
-- 3-4: Weak. Misses key points or very unclear.
-- 1-2: Very poor. Wrong, irrelevant, or almost no answer given.
-
-Be fair but honest. Do not inflate scores. If an answer is genuinely good for someone at their level, reward it with 8-9.
-
-Return ONLY a JSON object, nothing else:
-{
-  "technicalDepth": <1-10>,
-  "clarity": <1-10>,
-  "confidenceTone": <1-10>,
-  "feedback": "<2-3 sentences — what was strong, what was weak>",
-  "improvement": "<one specific actionable thing to improve>"
-}`
-
-    const result = await model.generateContent(prompt)
-    const response = result.response.text()
-    const cleaned = response.replace(/```json|```/g, "").trim()
+    const raw = await geminiWithRetry(prompt)
+    const cleaned = raw.replace(/```json|```/g, "").trim()
     const evaluation = JSON.parse(cleaned)
     res.json(evaluation)
-
   } catch (error) {
     console.error(error)
+    if (error?.message?.includes('429') || error?.message?.includes('quota') || error?.message?.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({ error: 'AI service is busy. Please wait 30 seconds and try again.' })
+    }
     res.status(500).json({ error: 'Failed to evaluate answer. Please try again.' })
   }
 })
 
+// ── VOICE CONVERSATION INTERVIEW ──────────────────────────────────────────────
+// This is the standout feature — real-time AI interviewer conversation
+// Frontend sends: { message, conversationHistory, resume, role, background, questionCount }
+// Backend responds with: { reply, isQuestion, questionNumber, isComplete }
+app.post('/voice-interview', authenticateToken, async (req, res) => {
+  const { message, conversationHistory = [], resume, role, background, questionCount = 0 } = req.body
+
+  try {
+    const maxQuestions = 5
+    const isFirstMessage = conversationHistory.length === 0
+    const historyText = conversationHistory
+      .slice(-4) // only last 4 messages to save tokens
+      .map(h => `${h.role === 'interviewer' ? 'Interviewer' : 'Candidate'}: ${h.content}`)
+      .join('\n')
+
+    // shortened prompt — fewer tokens = less quota pressure
+    const prompt = `You are a technical interviewer. Ask ${maxQuestions} questions total about the candidate's resume. Be brief and conversational.
+Role: ${role || 'Software Developer'}
+Background: ${background || 'Student'}
+Resume (brief): ${resume ? resume.substring(0, 300) : 'Not provided'}
+Questions asked so far: ${questionCount}/${maxQuestions}
+${historyText ? `Recent conversation:\n${historyText}` : ''}
+${isFirstMessage ? 'Greet briefly and ask question 1.' : `Candidate said: "${message}"\nGive one sentence of feedback then ${questionCount >= maxQuestions ? 'close the interview professionally and end with INTERVIEW_COMPLETE' : 'ask the next question'}.`}
+Keep response under 3 sentences.`
+
+    const raw = await geminiWithRetry(prompt, 3)
+    const reply = raw.trim()
+    const isComplete = reply.includes("INTERVIEW_COMPLETE")
+    const cleanReply = reply.replace("INTERVIEW_COMPLETE", "").trim()
+    const isQuestion = cleanReply.includes("?") && !isComplete
+
+    res.json({
+      reply: cleanReply,
+      isQuestion,
+      isComplete,
+      questionNumber: isQuestion ? questionCount + 1 : questionCount,
+    })
+
+  } catch (error) {
+    console.error(error)
+    if (error?.message?.includes('429') || error?.message?.includes('quota') || error?.message?.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({ error: 'AI is busy. Retrying in 30 seconds automatically.' })
+    }
+    res.status(500).json({ error: 'Failed to get AI response. Please try again.' })
+  }
+})
+
+// ── AUTH ROUTES ───────────────────────────────────────────────────────────────
 app.post('/send-otp', async (req, res) => {
   const { email } = req.body
   if (!email) return res.status(400).json({ error: 'email required' })
@@ -324,12 +344,17 @@ app.post('/send-otp', async (req, res) => {
     await prisma.oTP.create({ data: { email, code, expiresAt } })
     await transporter.sendMail({
       from: process.env.GMAIL_USER, to: email,
-      subject: 'Verify your email',
-      html: `<h2>Your OTP is ${code}</h2>`
+      subject: 'Your InterviewPrep OTP',
+      html: `<div style="font-family:Arial;max-width:400px;margin:0 auto;padding:24px;background:#0d1117;color:#fff;border-radius:12px">
+        <h2 style="color:#22c55e">InterviewPrep</h2>
+        <p>Your verification code is:</p>
+        <h1 style="color:#22c55e;letter-spacing:8px;font-size:36px">${code}</h1>
+        <p style="color:#6b7280;font-size:12px">Expires in 10 minutes</p>
+      </div>`
     })
     res.json({ message: 'OTP sent', email })
   } catch (err) {
-    console.error("OTP ERROR 👉", err)
+    console.error("OTP ERROR:", err)
     res.status(500).json({ error: 'Failed to send OTP' })
   }
 })
@@ -363,11 +388,7 @@ app.post('/login', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Invalid email or password' })
     const passwordMatch = await bcrypt.compare(password, user.password)
     if (!passwordMatch) return res.status(401).json({ error: 'Invalid email or password' })
-    const token = jwt.sign(
-      { userId: user.id, email: user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    )
+    const token = jwt.sign({ userId: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '7d' })
     res.json({ token, userId: user.id, email: user.email })
   } catch (error) {
     console.error(error)
@@ -375,52 +396,33 @@ app.post('/login', async (req, res) => {
   }
 })
 
-// ── SAVE SESSION ───────────────────────────────────────────────────────────────
-// scores is now an array: [{ category, technicalDepth, clarity, confidenceTone, feedback, improvement }, ...]
-// or for coding: [{ category, correctness, codeQuality, efficiency, feedback, improvement }, ...]
+// ── SESSION ROUTES ────────────────────────────────────────────────────────────
 app.post('/save-session', authenticateToken, async (req, res) => {
-  const { role, background, scores, violations } = req.body
+  const { role, background, scores, violations, isVoiceMode } = req.body
   if (!role || !scores) return res.status(400).json({ error: 'role and scores required' })
-
   try {
     const userId = String(req.user.userId)
     const user = await prisma.user.findUnique({ where: { id: userId } })
     const allSessions = await prisma.interviewSession.findMany({ where: { userId } })
-
     const { newStreak, isStreak } = calculateStreak(user.lastActiveAt, user.streak)
     const { total: xpEarned, breakdown } = calculateXP(scores, violations || {}, isStreak)
     const newXP = user.xp + xpEarned
     const newLevel = getLevelFromXP(newXP).level
-
-    const updatedSessions = [...allSessions, { scores, violations: violations || {} }]
-    const { newBadges, awarded } = await checkAndAwardBadges(
-      userId, user.badges || [], updatedSessions, scores, newStreak
-    )
-
+    const updatedSessions = [...allSessions, { scores, violations: violations || {}, isVoiceMode }]
+    const { newBadges, awarded } = await checkAndAwardBadges(userId, user.badges || [], updatedSessions, scores, newStreak)
     const session = await prisma.interviewSession.create({
-      data: {
-        userId,
-        role,
-        background: background || "",
-        scores,       // array of per-question dimension scores
-        violations: violations || {},
-        xpEarned
-      }
+      data: { userId, role, background: background || "", scores, violations: violations || {}, xpEarned, isVoiceMode: isVoiceMode || false }
     })
-
     await prisma.user.update({
       where: { id: userId },
       data: { xp: newXP, level: newLevel, streak: newStreak, lastActiveAt: new Date(), badges: newBadges }
     })
-
     res.json({
-      message: 'Session saved',
-      session,
+      message: 'Session saved', session,
       xp: { earned: xpEarned, total: newXP, breakdown, levelUp: newLevel > user.level, newLevel: getLevelFromXP(newXP) },
       streak: { current: newStreak, isStreak },
       badges: { awarded, total: newBadges }
     })
-
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to save session' })
@@ -435,7 +437,6 @@ app.get('/sessions', authenticateToken, async (req, res) => {
     })
     res.json({ sessions })
   } catch (err) {
-    console.error(err)
     res.status(500).json({ error: 'Failed to fetch sessions' })
   }
 })
@@ -449,8 +450,7 @@ app.get('/profile', authenticateToken, async (req, res) => {
     const levelInfo = getLevelFromXP(user.xp)
     const nextLevel = LEVELS.find(l => l.level === levelInfo.level + 1)
     res.json({
-      ...user,
-      levelInfo,
+      ...user, levelInfo,
       nextLevel: nextLevel || null,
       xpToNext: nextLevel ? nextLevel.minXP - user.xp : 0,
       allBadges: Object.values(BADGES)
@@ -460,4 +460,5 @@ app.get('/profile', authenticateToken, async (req, res) => {
   }
 })
 
-app.listen(4000, () => console.log("Server running on port 4000"))
+const PORT = process.env.PORT || 4000
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
