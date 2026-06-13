@@ -10,16 +10,11 @@ const { GoogleGenerativeAI } = require("@google/generative-ai")
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
-const nodemailer = require('nodemailer')
 const multer = require('multer')
 const path = require('path')
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false,
-  auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS }
-})
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ── GEMINI RETRY WRAPPER ──────────────────────────────────────────────────────
 // fix 2: retry up to 3 times with exponential backoff on quota errors
@@ -344,16 +339,17 @@ app.post('/send-otp', async (req, res) => {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000)
     await prisma.oTP.deleteMany({ where: { email } })
     await prisma.oTP.create({ data: { email, code, expiresAt } })
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER, to: email,
-      subject: 'Your InterviewPrep OTP',
-      html: `<div style="font-family:Arial;max-width:400px;margin:0 auto;padding:24px;background:#0d1117;color:#fff;border-radius:12px">
-        <h2 style="color:#22c55e">InterviewPrep</h2>
-        <p>Your verification code is:</p>
-        <h1 style="color:#22c55e;letter-spacing:8px;font-size:36px">${code}</h1>
-        <p style="color:#6b7280;font-size:12px">Expires in 10 minutes</p>
-      </div>`
-    })
+    await resend.emails.send({
+  from: 'onboarding@resend.dev',
+  to: email,
+  subject: 'Your InterviewPrep OTP',
+  html: `<div style="font-family:Arial;max-width:400px;margin:0 auto;padding:24px;background:#0d1117;color:#fff;border-radius:12px">
+    <h2 style="color:#22c55e">InterviewPrep</h2>
+    <p>Your verification code is:</p>
+    <h1 style="color:#22c55e;letter-spacing:8px;font-size:36px">${code}</h1>
+    <p style="color:#6b7280;font-size:12px">Expires in 10 minutes</p>
+  </div>`
+})
     res.json({ message: 'OTP sent', email })
   } catch (err) {
     console.error("OTP ERROR:", err)

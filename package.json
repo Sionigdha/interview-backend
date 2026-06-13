@@ -30,6 +30,7 @@
     "pdf-parse": "^2.4.5",
     "prisma": "^6.19.3",
     "recharts": "^3.8.1",
+    "resend": "^6.12.4",
     "tesseract.js": "^7.0.0"
   }
 }
