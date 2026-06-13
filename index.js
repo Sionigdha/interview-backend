@@ -331,29 +331,42 @@ Keep response under 3 sentences.`
 // ── AUTH ROUTES ───────────────────────────────────────────────────────────────
 app.post('/send-otp', async (req, res) => {
   const { email } = req.body
-  if (!email) return res.status(400).json({ error: 'email required' })
+  if (!email) return res.status(400).json({ error: 'Email is required' })
+
+  // email format validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  if (!emailRegex.test(email)) return res.status(400).json({ error: 'Please enter a valid email address' })
+
   try {
     const existing = await prisma.user.findUnique({ where: { email } })
     if (existing) return res.status(400).json({ error: 'Email already registered' })
+
     const code = Math.floor(100000 + Math.random() * 900000).toString()
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000)
     await prisma.oTP.deleteMany({ where: { email } })
     await prisma.oTP.create({ data: { email, code, expiresAt } })
-    await resend.emails.send({
-  from: 'onboarding@resend.dev',
-  to: email,
-  subject: 'Your InterviewPrep OTP',
-  html: `<div style="font-family:Arial;max-width:400px;margin:0 auto;padding:24px;background:#0d1117;color:#fff;border-radius:12px">
-    <h2 style="color:#22c55e">InterviewPrep</h2>
-    <p>Your verification code is:</p>
-    <h1 style="color:#22c55e;letter-spacing:8px;font-size:36px">${code}</h1>
-    <p style="color:#6b7280;font-size:12px">Expires in 10 minutes</p>
-  </div>`
-})
+
+    const { error: resendError } = await resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: email,
+      subject: 'Your InterviewPrep OTP',
+      html: `<div style="font-family:Arial;max-width:400px;margin:0 auto;padding:24px;background:#0d1117;color:#fff;border-radius:12px">
+        <h2 style="color:#22c55e">InterviewPrep</h2>
+        <p>Your verification code is:</p>
+        <h1 style="color:#22c55e;letter-spacing:8px;font-size:36px">${code}</h1>
+        <p style="color:#6b7280;font-size:12px">Expires in 10 minutes</p>
+      </div>`
+    })
+
+    if (resendError) {
+      console.error("Resend error:", resendError)
+      return res.status(400).json({ error: 'Could not deliver email. Please check the address and try again.' })
+    }
+
     res.json({ message: 'OTP sent', email })
   } catch (err) {
     console.error("OTP ERROR:", err)
-    res.status(500).json({ error: 'Failed to send OTP' })
+    res.status(500).json({ error: 'Failed to send OTP. Please try again.' })
   }
 })
 
