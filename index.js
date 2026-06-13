@@ -347,7 +347,7 @@ app.post('/send-otp', async (req, res) => {
     await prisma.oTP.create({ data: { email, code, expiresAt } })
 
     const { error: resendError } = await resend.emails.send({
-      from: 'onboarding@resend.dev',
+      from: 'noreply@interviewprep.study',
       to: email,
       subject: 'Your InterviewPrep OTP',
       html: `<div style="font-family:Arial;max-width:400px;margin:0 auto;padding:24px;background:#0d1117;color:#fff;border-radius:12px">
